@@ -12,7 +12,8 @@ dashboard walkthroughs — so you can browse or reproduce any phase independentl
   gotchas hit along the way.
 - **`02-num-replicas/`** — *(next up)* scaling the same local setup to multiple Serve replicas, exercising
   Ray's autoscaler and multi-worker request routing.
-- **`03-aws-eks/`** — *(planned)* the same workload deployed to a real AWS EKS cluster.
+- **[`03-aws-eks/`](03-aws-eks/README.md)** — *(planned, currently blocked on GPU quota approval)* the same
+  workload deployed to a real AWS EKS cluster.
 
 ## Why folders instead of branches
 
