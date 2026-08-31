@@ -5,34 +5,25 @@ metadata:
 spec:
   serveConfigV2: |
     applications:
-      - name: fruit_app
-        import_path: fruit.deployment_graph
-        route_prefix: /fruit
-        runtime_env:
-          working_dir: "https://github.com/ray-project/test_dag/archive/78b4a5da38796123d9f9ffff59bab2792a043e95.zip"
+      - name: llm_app
+        import_path: serve_llm:app
+        route_prefix: /generate
         deployments:
-          - name: MangoStand
+          - name: QwenChat
             num_replicas: 1
             ray_actor_options:
-              num_cpus: 0.1
-          - name: OrangeStand
-            num_replicas: 1
-            ray_actor_options:
-              num_cpus: 0.1
-          - name: FruitMarket
-            num_replicas: 1
-            ray_actor_options:
-              num_cpus: 0.1
+              num_cpus: 1
   rayClusterConfig:
     rayVersion: '2.44.0'
     enableInTreeAutoscaling: true
     headGroupSpec:
-      rayStartParams: {}
+      rayStartParams:
+        num-cpus: "0"   # keep the model off the head node; only the Serve proxy runs here
       template:
         spec:
           containers:
             - name: ray-head
-              image: rayproject/ray:2.44.0-aarch64
+              image: multinode-llm-serving/ray-qwen:2.44.0-aarch64
               resources:
                 limits:
                   cpu: "1"
@@ -52,18 +43,18 @@ spec:
     workerGroupSpecs:
       - replicas: 1
         minReplicas: 1
-        maxReplicas: 3
+        maxReplicas: 2
         groupName: small-group
         rayStartParams: {}
         template:
           spec:
             containers:
               - name: ray-worker
-                image: rayproject/ray:2.44.0-aarch64
+                image: multinode-llm-serving/ray-qwen:2.44.0-aarch64
                 resources:
                   limits:
+                    cpu: "2"
+                    memory: "4Gi"
+                  requests:
                     cpu: "1"
                     memory: "2Gi"
-                  requests:
-                    cpu: "500m"
-                    memory: "1Gi"
