@@ -34,9 +34,20 @@ brew install helm
 ```
 
 This creates a cluster named `raylab` (one control-plane node + 2 agent nodes) and maps host ports `8265`
-(Ray dashboard) and `8000` (Serve HTTP) to the k3d load balancer container (`k3d-raylab-serverlb`). In practice
-the RayService's head service is `ClusterIP`, and nothing forwards the load balancer's mapped ports to it — so
-that mapping alone doesn't get you to the dashboard/Serve HTTP. Use `kubectl port-forward` instead (see step 5).
+(Ray dashboard) and `8000` (Serve HTTP) to the k3d load balancer container (`k3d-raylab-serverlb`).
+
+That mapping alone won't get you to the dashboard/Serve HTTP, though — it's worth understanding why. k3d's
+load balancer does raw TCP-level port forwarding: it takes a connection on host port 8000 and forwards it to
+port 8000 on the underlying node containers' network namespace, with no awareness of Kubernetes Services or
+Pods. For that to reach anything, some process needs to actually be bound to port 8000 on the node itself —
+which is what a `NodePort` or `hostNetwork` Service does. `rayservice-sample-head-svc` is a `ClusterIP`
+Service, which is a virtual, cluster-internal-only address that `kube-proxy` intercepts via iptables/ipvs
+rules for traffic *originating inside* the pod network — it never binds a real port on the node's host
+network. So the load balancer's forwarded connection has nowhere to land; you'll see it accept the TCP
+connection and then return nothing (`curl: (52) Empty reply from server`). Use `kubectl port-forward` instead
+(see step 5) — it tunnels through the Kubernetes API server directly to a specific Pod, bypassing node
+networking (and the load balancer) entirely.
+
 Also note: since port `8000` on your host is already claimed by that load-balancer mapping, `kubectl port-forward`
 on `8000` will fail with "address already in use" — forward to a different local port instead (e.g. `8090`).
 
@@ -159,3 +170,31 @@ Ray publishes native `-aarch64` builds for every version/variant on Docker Hub �
 list if you bump the Ray version and make sure the `-aarch64` counterpart exists. This also applies to any custom
 image you build on top of it (like this repo's `Dockerfile`) — build natively on your arm64 machine rather than
 cross-compiling, and it'll inherit the correct architecture automatically.
+
+## Troubleshooting
+
+**k3d nodes share one resource pool — they aren't independent machines.** `kubectl describe nodes` reports the
+same `Allocatable` CPU/memory for `k3d-raylab-server-0`, `k3d-raylab-agent-0`, and `k3d-raylab-agent-1` (on this
+setup, ~16.5GB memory / 10 CPUs each) because all three are just containers backed by the *same* Docker Desktop
+VM, not separate machines each with their own dedicated resources. That number is the whole shared host pool,
+not per-node capacity. This matters once you're running multiple worker replicas — don't assume each worker
+gets its own 16.5GB; they're all drawing from one shared pot, and Docker Desktop's own VM memory limit is the
+real ceiling.
+
+**Head pod memory runs close to its limit even without the model on it.** In testing, the head pod sat around
+85% of its `2Gi` memory limit (see `dashboard/dashboard-cluster.md`) purely from GCS, the dashboard, the
+autoscaler sidecar, and the Serve controller/proxy — before the `QwenChat` model replica is even in the
+picture, since `num-cpus: "0"` keeps it off the head entirely. This hasn't caused an OOM, but there's little
+slack. If the head pod restarts or the dashboard becomes unresponsive, bump `headGroupSpec`'s container memory
+limit from `2Gi` to `3Gi` in `ray-service-sample.yaml`.
+
+**`git push` fails with `HTTP 400` / "unexpected disconnect while reading sideband packet".** This showed up
+pushing this repo to GitHub and is unrelated to repo size (the whole repo is ~1MB) — it looks like chunked
+transfer-encoding getting interrupted somewhere on the network path (proxy/VPN), not an auth or permissions
+issue. Retrying with a larger, non-chunked post buffer and HTTP/1.1 for that one push resolved it:
+
+```bash
+git -c http.postBuffer=157286400 -c http.version=HTTP/1.1 push origin main
+```
+
+This only affects that single invocation — it doesn't change your persisted git config.

@@ -67,5 +67,18 @@ The `ProxyActor` is unaffected by that setting because it requests ~0 CPU — Ra
 thing to `port-forward` and `curl` against: its proxy is what actually receives the HTTP request and forwards
 it internally to wherever the replica really lives.
 
+## The worker's proxy is currently idle — and that's expected
+
+Notice the worker also runs a `ProxyActor` (see `dashboard/dashboard-actors.md`), even though every request in
+this setup arrives through the head's proxy and the worker's own proxy never gets touched. That's not wasted
+config — it's Ray Serve's default `ProxyLocation: EveryNode` behavior, designed for production deployments
+where a real load balancer or Kubernetes Service spreads incoming HTTP connections across *all* node IPs, not
+just one. In that setup, any node's proxy can receive a request and route it (via Ray RPC) to whichever
+replica actually holds it, wherever in the cluster that replica lives. Here, with a single `kubectl
+port-forward` pointed only at the head service, that flexibility just isn't being exercised yet — it becomes
+relevant once there's a second worker and replica in the picture (e.g. bumping `num_replicas` to 2), since a
+production ingress path could then land a request on *either* worker's proxy and still reach the correct
+replica.
+
 See `dashboard/dashboard-actors.md` for the live actor listing this diagram is based on, and
 `dashboard/dashboard-serve-inference-requests.md` for the real request-latency numbers observed.
