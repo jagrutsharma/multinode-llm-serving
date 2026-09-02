@@ -14,7 +14,7 @@ dashboard walkthroughs — so you can browse or reproduce any phase independentl
   config change surfaced a real debugging arc: an OOM caused by Ray's scheduler tracking *declared* rather
   than *actual* memory usage, a `DEPLOY_FAILED` deadlock, and a router-refresh nuance where naive concurrent
   requests can silently pile onto one replica instead of load-balancing across both.
-- **[`03-aws-eks/`](03-aws-eks/README.md)** — *(planned, currently blocked on GPU quota approval)* the same
+- **[`03-aws-eks/`](03-aws-eks/README.md)** — *(planned)* the same
   workload deployed to a real AWS EKS cluster.
 
 ## Why folders instead of branches
