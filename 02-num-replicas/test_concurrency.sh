@@ -22,7 +22,7 @@ LOCAL_PORT=8100
 OUT_DIR=$(mktemp -d)
 echo "Writing per-request output to: $OUT_DIR"
 
-# Open tunnel from local port 8100 to RayServerice's head service on port 8000 (the Serve HTTP Proxy)
+# Open tunnel from local port 8100 to RayService's head service on port 8000 (the Serve HTTP Proxy)
 # & at the end puts this in background. This prevents blocking of the script
 kubectl port-forward svc/rayservice-sample-head-svc "${LOCAL_PORT}:8000" > "${OUT_DIR}/port-forward.log" 2>&1 &
 
@@ -34,7 +34,7 @@ sleep 3
 
 # Counter for naming each request's output files uniquely so we can read the responses
 i=0
-# Empty array to collec the PID of each request's sub-shell
+# Empty array to collect the PID of each request's sub-shell
 PIDS=()
 
 # Feed the 5 prompt lines into the loop, one at a time
