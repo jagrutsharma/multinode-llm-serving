@@ -366,3 +366,129 @@ identical to, the `nvidia-smi` numbers (1151MiB there vs. 1415MiB here) simply b
 few seconds apart, not because they disagree — two different tools, one via the NVIDIA driver directly, one
 via Ray's own scheduler bookkeeping, converging on the same story: a real GPU, actually in use, not just
 requested on paper.
+
+## Scaling to 2 GPU workers
+
+Same milestone as [phase 2](../02-num-replicas/README.md)'s `num_replicas: 2` — except this time each
+replica needs its own physical GPU, not just a slice of shared CPU, which adds a real step phase 2 never
+needed.
+
+**Growing the hardware ceiling manually.** Recall the earlier ["should we introduce Karpenter or Cluster
+Autoscaler"](#three-layers-of-configuration)-style tradeoff: without one of those installed, Ray's own
+autoscaler can ask Kubernetes for a second worker *pod*, but that pod stays `Pending` forever unless a real
+second EC2 instance already exists to schedule it onto. `maxSize: 2` on the `gpu-worker` node group (set
+back when the cluster was first created) means it's *allowed* to grow — nothing grows it automatically. So
+the first step is manual, standing in for what Karpenter/Cluster Autoscaler would otherwise automate:
+
+```bash
+eksctl scale nodegroup --cluster raylab-eks --name gpu-worker --nodes 2
+```
+
+```
+$ eksctl get nodegroup --cluster raylab-eks --region us-east-1 --name gpu-worker
+CLUSTER      NODEGROUP    STATUS    MIN SIZE    MAX SIZE    DESIRED CAPACITY    INSTANCE TYPE
+raylab-eks   gpu-worker   ACTIVE    1           2           2                   g4dn.xlarge
+```
+
+![eksctl get nodegroup showing desired capacity 2](dashboard/scaling/aws-eks-scaled-cli.png)
+![AWS console showing 3 nodes, the new gpu-worker node Ready](dashboard/scaling/aws-eks-scaled-home.png)
+
+**Bumping Serve's replica count.** With real hardware available, the actual scaling lever is the same one
+phase 2 used — `num_replicas` in `serveConfigV2`, bumped from `1` to `2`. `workerGroupSpecs.replicas` was
+deliberately left at `1`, not manually set to `2`: since `enableInTreeAutoscaling: true` and
+`maxReplicas: 2` were already in place, Ray's own autoscaler detects the new replica demand and requests
+the second worker pod itself — the more interesting demonstration, since it's the autoscaler ceiling from
+the three-layer model actually doing its job now that it has hardware to ask for.
+
+```bash
+kubectl apply -f ray-service-sample.yaml
+```
+
+The second worker pod goes through the same `Init:0/1` → `PodInitializing` → `Running` sequence as the
+first one did, this time landing on the freshly-joined node:
+
+![AWS console pod detail page showing the second worker pod Init:0/1](dashboard/scaling/eks-pods-scaling-in-progress.png)
+![AWS console pod detail page showing the second worker pod Running](dashboard/scaling/eks-pods-scaling-complete.png)
+
+The Ray dashboard shows the same transition from its own side — the Serve tab mid-upscale, and the Cluster
+tab once both replicas are alive, each with its own GPU and its own model already loaded into GRAM:
+
+![Ray dashboard Serve tab showing QwenChat UPSCALING to 2 replicas](dashboard/scaling/ray-serve-scaling-in-progress.png)
+![Ray dashboard Cluster tab showing 3 alive nodes, GRAM allocated on both GPU workers](dashboard/scaling/ray-cluster-scaling-complete.png)
+
+**Proving requests actually spread across both GPU nodes, not just that both exist.** Same technique as
+phase 2's concurrency test — [`test_concurrency.sh`](test_concurrency.sh) fires 5 requests staggered 200ms
+apart, adapted to target `rayservice-sample-serve-svc` (the Service that always points at whichever pods are
+currently serving, covered [above](#no-k3d-image-import-here--need-a-real-registry-ecr)) instead of phase
+2's `-head-svc`:
+
+```
+req0 start=1788475742 end=1788475744 duration=2s prompt="What is Kubernetes?"
+req1 start=1788475742 end=1788475744 duration=2s prompt="What is Ray?"
+req2 start=1788475743 end=1788475745 duration=2s prompt="What is Docker?"
+req3 start=1788475743 end=1788475746 duration=3s prompt="What is Python?"
+req4 start=1788475743 end=1788475747 duration=4s prompt="What is a container?"
+```
+
+Durations tier into a rough `2s / 2s / 2s / 3s / 4s` spread rather than one steep staircase — consistent
+with load actually spreading, not all 5 queueing behind each other on one replica. Ground truth comes from
+each replica's own Serve logs in the Ray dashboard (Serve → `QwenChat` → replica → Logs):
+
+![Replica ds7npbeb's logs showing 3 POST /generate completions](dashboard/scaling/replica-ds7npbeb-log.png)
+![Replica yae7x5cf's logs showing 2 POST /generate completions](dashboard/scaling/replica-yae7x5cf-log.png)
+
+- **`ds7npbeb`** (node `192.168.18.10`, the original GPU worker) — 3 completions, at `1280.9ms`, `2299.8ms`,
+  `3159.1ms`
+- **`yae7x5cf`** (node `192.168.32.208`, the newly-joined GPU worker) — 2 completions, at `1606.3ms`,
+  `2412.1ms`
+
+3 + 2 = 5, exactly the request count sent. Both replicas were actively generating tokens in the same
+~4-second window — genuine concurrent inference across two separate physical `g4dn.xlarge` instances, a
+stronger claim than phase 2's version, which spread load across two processes on one machine.
+
+**The most direct evidence of all: `nvidia-smi` on both worker pods, polled with timestamps, during the same
+test run** — not Ray's own bookkeeping this time, but the NVIDIA driver on each separate physical GPU:
+
+```bash
+kubectl exec rayservice-sample-wgpd7-gpu-group-worker-j75nx -c ray-worker -- \
+  nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,noheader
+kubectl exec rayservice-sample-wgpd7-gpu-group-worker-xr8tb -c ray-worker -- \
+  nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used --format=csv,noheader
+```
+
+![nvidia-smi polled with timestamps on both GPU worker pods during the concurrency test, showing overlapping non-zero utilization windows](dashboard/scaling/dual-gpu-concurrent-util.png)
+
+`j75nx` shows `26%` at `16:09:50.227` and `27%` at `16:09:51.525`; `xr8tb` shows `26%` at `16:09:51.060` —
+squarely inside `j75nx`'s active window. Two independent EC2 instances, two independent Tesla T4 GPUs, both
+computing at the same wall-clock moment, confirmed by the driver directly rather than any layer of
+Kubernetes or Ray bookkeeping in between.
+
+One more repeatable finding worth keeping, in the same honest-caveat spirit as the single-worker section:
+one of the five responses claimed *"Ray is an open-source framework... developed by Alibaba Cloud"* — the
+same false-attribution pattern as before, just aimed at a different noun. Not a fluke; a consistent failure
+mode of a 0.5B-parameter model, unrelated to anything in this deployment.
+
+## Bonus: a small chat UI
+
+Everything so far exercised the endpoint via `curl`. [`ui/chat_ui.py`](ui/chat_ui.py) wraps it in an actual
+chat interface using [Gradio](https://gradio.app)'s `ChatInterface` — a few lines of Python, no separate
+frontend build. Worth noting why it's Python calling the endpoint server-side rather than a plain HTML page
+with JavaScript `fetch()`: browsers enforce CORS on cross-origin requests, and Ray Serve's default HTTP
+ingress doesn't send CORS headers, so a static page calling `localhost:8000` directly would silently fail.
+Routing the call through Python sidesteps that entirely.
+
+```bash
+cd ui
+pip install -r requirements.txt
+kubectl port-forward svc/rayservice-sample-serve-svc 8000:8000   # separate terminal, keep running
+./run_ui.sh
+```
+
+![Gradio chat UI showing three exchanges with the Qwen2.5-0.5B model](dashboard/chat_ui.png)
+
+Same model, same GPU-backed replica, now with actual chat bubbles instead of raw JSON. One honest
+limitation baked into the UI's own description text: `serve_llm.py`'s `__call__` doesn't track conversation
+history server-side — each message is sent as an independent prompt, so unlike real ChatGPT, the model
+won't recall earlier turns in the same session. This is a convenience layer for interacting with the
+deployment, not a new piece of the infrastructure story — the GPU-backed serving underneath it is unchanged
+from everything documented above.
