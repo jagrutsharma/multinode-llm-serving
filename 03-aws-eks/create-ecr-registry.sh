@@ -1,0 +1,1 @@
+aws ecr create-repository --repository-name multinode-llm-serving/ray-qwen-gpu --region us-east-1
