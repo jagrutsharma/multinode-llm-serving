@@ -1,0 +1,71 @@
+# RayService CRD wrapper (Custom Resource Definition)
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: rayservice-sample
+spec:
+  # *** Ray Serve app config ***
+  # num_gpus only means something once the node actually has a GPU to give it.
+  serveConfigV2: |
+    applications:
+    - name: llm_app
+      import_path: serve_llm:app
+      route_prefix: /generate
+      deployments:
+        - name: QwenChat
+          num_replicas: 2
+          ray_actor_options:
+            num_cpus: 1
+            num_gpus: 1
+  # *** Ray cluster-level config ***
+  rayClusterConfig:
+    rayVersion: '2.44.0'
+    enableInTreeAutoscaling: true
+    headGroupSpec:
+      rayStartParams:
+        num-cpus: "0" # keep the model off the head, same pattern as phases 1-2
+      template:
+        spec:
+          nodeSelector:
+            role: head  # pins this pod to the head-cpu node group (labeled via eksctl)
+          containers:
+            - name: ray-head
+              image: 722323574575.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-gpu:latest
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: "2Gi"
+                requests:
+                  cpu: "500m"
+                  memory: "2Gi"
+              ports:
+                - containerPort: 6379
+                  name: gcs-server
+                - containerPort: 8265
+                  name: dashboard
+                - containerPort: 10001
+                  name: client
+                - containerPort: 8000
+                  name: serve
+    workerGroupSpecs:
+      - replicas: 1
+        minReplicas: 1
+        maxReplicas: 2    # matches the gpu-worker node group's maxSize: 2, ready for the 2-worker step later
+        groupName: gpu-group
+        rayStartParams: {}
+        template:
+          spec:
+            nodeSelector:
+              role: gpu-worker  # pins this pod to the GPU node group
+            containers:
+              - name: ray-worker
+                image: 722323574575.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-gpu:latest
+                resources:
+                  limits:
+                    cpu: "3"
+                    memory: "12Gi"
+                    nvidia.com/gpu: "1"   # the real k8s GPU resource request
+                  requests:
+                    cpu: "2"
+                    memory: "8Gi"
+                    nvidia.com/gpu: "1"   # must exactly match limits - hard rule for device-plugin resources
