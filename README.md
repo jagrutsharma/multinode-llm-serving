@@ -14,8 +14,11 @@ dashboard walkthroughs — so you can browse or reproduce any phase independentl
   config change surfaced a real debugging arc: an OOM caused by Ray's scheduler tracking *declared* rather
   than *actual* memory usage, a `DEPLOY_FAILED` deadlock, and a router-refresh nuance where naive concurrent
   requests can silently pile onto one replica instead of load-balancing across both.
-- **[`03-aws-eks/`](03-aws-eks/README.md)** — *(planned)* the same
-  workload deployed to a real AWS EKS cluster.
+- **[`03-aws-eks/`](03-aws-eks/README.md)** — the same workload on a real AWS EKS cluster with GPU-backed
+  nodes (CUDA/float16 inference instead of CPU-only). Covers a three-layer mental model for the config
+  (eksctl / rayClusterConfig / serveConfigV2), a real debugging chain where an auto-installed NVIDIA device
+  plugin crash-looped its way into a disk-pressure lockout, scaling to 2 GPU workers with ground-truth proof
+  of cross-node load-balancing, and a small Gradio chat UI for interacting with the deployment.
 
 ## Why folders instead of branches
 

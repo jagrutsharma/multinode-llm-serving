@@ -5,7 +5,7 @@ metadata:
   name: rayservice-sample
 spec:
   # *** Ray Serve app config ***
-  # *** num_gpus only means something once the node actually has a GPU to give it.
+  # num_gpus only means something once the node actually has a GPU to give it.
   serveConfigV2: |
     applications:
     - name: llm_app
