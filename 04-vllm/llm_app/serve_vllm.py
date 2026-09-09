@@ -8,12 +8,15 @@ llm_config = LLMConfig(
         "model_source": "Qwen/Qwen2.5-0.5B-Instruct",
     },
     accelerator_type="T4",
-    placement_group_config={"bundle_per_worker": {"CPU": 1, "GPU": 1}},
+    engine_kwargs={"dtype": "float16"},
     deployment_config={
+        "ray_actor_options": {
+            "num_cpus": 1,
+        },
         "autoscaling_config": {
             "min_replicas": 1,
             "max_replicas": 1,
-        }
+        },
     },
 )
 
