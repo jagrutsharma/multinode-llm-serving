@@ -11,7 +11,7 @@ Getting it deployed took three real bugs, three different categories of mistake:
 
 The comparison itself is the real story. I expected a modest gap — a 0.5B model seemed too small for batching to matter much. It wasn't modest. At 16 concurrent requests, vLLM delivered ~27x the throughput of plain Transformers, latency flat under a second while the old setup's climbed past 13. Counterintuitively, the small model seemed to benefit *more* from batching, not less — likely because fixed per-request overhead dominates more when the model's own compute cost is tiny. Plausible, not confirmed — would need profiling to actually verify.
 
-Scaled to 2 GPU workers next and found two independent autoscalers stacked on top of each other, each with its own separate flakiness. Pushed the concurrency sweep up to 256 to find where a single replica actually saturates, and confirmed a second replica genuinely extends that ceiling rather than just adding idle redundancy.
+Scaled to 2 GPU workers next, pushing the concurrency sweep up to 256 — confirmed a second replica genuinely extends the ceiling a single replica saturates at, not just idle redundancy.
 
 Also found a real gap in eksctl itself along the way — the auto-installed NVIDIA device plugin has no way to restrict itself to GPU-only nodes, so it can crash-loop its way into taking down an unrelated node. Filed it upstream.
 
