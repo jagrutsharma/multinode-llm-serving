@@ -9,14 +9,36 @@ plain HuggingFace Transformers (`AutoModelForCausalLM` + `.generate()`); this ph
 [`ray.serve.llm`](https://docs.ray.io/en/latest/serve/llm/index.html) module.
 
 The point of this phase isn't "vLLM is faster" measured on a single request — at this model size, per-request
-latency barely differs between engines, and phase 3 never systematically measured single-request TTFT/TPOT
-in the first place. The real, honest comparison is **throughput and latency under concurrent load**: HF
+latency barely differs between engines. The real, honest comparison is **throughput and latency under
+concurrent load**: HF
 Transformers handles requests to one replica sequentially, while vLLM is built around two specific
 optimizations for exactly this situation — **continuous batching** (folding new requests into an in-progress
 batch instead of waiting for the current one to finish) and **paged attention** (managing the KV cache in
 fixed-size blocks, like OS virtual memory pages, instead of one large contiguous allocation per request —
 letting far more concurrent sequences fit in the same GPU memory). That's the axis this phase actually
-tests — a concurrency sweep (1, 2, 4, 8, 16 simultaneous requests) run identically against both engines.
+tests — a concurrency sweep (1, 2, 4, 8, 16 simultaneous requests) run identically against both engines,
+later extended further (up to 256) to find where a single vLLM replica actually saturates and confirm a
+second replica genuinely extends that ceiling — see [Scaling to 2 GPU workers](#scaling-to-2-gpu-workers).
+
+## Contents
+
+- [Reusing phase 3's infrastructure](#reusing-phase-3s-infrastructure)
+- [The engine swap: from `.generate()` to `ray.serve.llm`](#the-engine-swap-from-generate-to-rayservellm)
+  - [The API contract changes too](#the-api-contract-changes-too)
+- [Building and pushing the vLLM image](#building-and-pushing-the-vllm-image)
+- [A local disk-space gotcha — not the same one from phase 3](#a-local-disk-space-gotcha--not-the-same-one-from-phase-3)
+- [Deploying](#deploying)
+  - [`RayService` vs. `Service` — two different layers](#rayservice-vs-service--two-different-layers)
+  - [A version-pinned docs gotcha](#a-version-pinned-docs-gotcha)
+  - [A second, subtler bug: asking for the same GPU twice](#a-second-subtler-bug-asking-for-the-same-gpu-twice)
+  - [A third bug, but the clearest one: the wrong dtype default](#a-third-bug-but-the-clearest-one-the-wrong-dtype-default)
+  - [Confirmed healthy](#confirmed-healthy)
+  - [Why `LLMRouter` gets 2 replicas by default](#why-llmrouter-gets-2-replicas-by-default)
+- [Benchmark methodology](#benchmark-methodology)
+- [Results](#results)
+- [Scaling to 2 GPU workers](#scaling-to-2-gpu-workers)
+  - [Finding vLLM's saturation point](#finding-vllms-saturation-point)
+- [Bonus: a small chat UI](#bonus-a-small-chat-ui)
 
 ## Reusing phase 3's infrastructure
 
@@ -33,8 +55,10 @@ way; just not shared *by reference*.
 
 One deliberate difference from phase 3's own scaling story: for the benchmark itself, only **1 GPU worker**
 is needed. The concurrency sweep tests how a single replica on a single GPU handles increasing concurrent
-load — it isn't about scaling across nodes. 2-GPU-worker scaling (mirroring phase 3's own arc) comes later,
-as a separate step, once the single-GPU comparison is solid.
+load — it isn't about scaling across nodes. That's a comparison of *engines* (HF vs. vLLM), each tested on
+the same single GPU, not a comparison of GPUs. 2-GPU-worker scaling (mirroring phase 3's own arc) — a
+separate comparison, of *replica count* rather than engine — comes later, once the HF-vs-vLLM engine
+comparison is solid.
 
 ## The engine swap: from `.generate()` to `ray.serve.llm`
 
@@ -102,8 +126,21 @@ OpenAI-compatible server stack on top of the Ray version already baked into the 
 *latest* release is, which could try to upgrade Ray itself mid-build — a much bigger, less predictable
 change than swapping the inference engine alone.
 
-Pushed to a separate ECR repository (`multinode-llm-serving/ray-qwen-vllm`) rather than overwriting phase
-3's `ray-qwen-gpu` tag, so both images stay available side by side for the comparison.
+```bash
+aws ecr create-repository --repository-name multinode-llm-serving/ray-qwen-vllm --region us-east-1
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
+docker build --platform linux/amd64 -t <account-id>.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-vllm:latest .
+docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-vllm:latest
+```
+
+(first two lines wrapped as [`scripts/create-ecr-registry.sh`](scripts/create-ecr-registry.sh) and
+[`scripts/auth-docker-to-ecr.sh`](scripts/auth-docker-to-ecr.sh); last two as
+[`scripts/build_and_push_to_ecr.sh`](scripts/build_and_push_to_ecr.sh))
+
+Pushed to a **separate** ECR repository (`multinode-llm-serving/ray-qwen-vllm`) rather than overwriting phase
+3's `ray-qwen-gpu` tag, so both images stay available side by side for the comparison. `--platform linux/amd64`
+is explicit here for the same reason phase 3 needed it eventually — building on an Apple Silicon Mac
+defaults to arm64 otherwise, and `rayproject/ray:2.44.0-gpu` only ships `amd64`.
 
 ## A local disk-space gotcha — not the same one from phase 3
 
@@ -130,7 +167,7 @@ Fixed with two safe, fully reproducible cleanups (nothing here is unique or unre
 
 ```bash
 docker builder prune -a -f
-docker rmi 722323574575.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-gpu:latest
+docker rmi <account-id>.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/ray-qwen-gpu:latest
 ```
 
 Freed ~36.7GB. Also worth knowing: Docker Desktop's actual VM disk *allocation* isn't something
@@ -181,16 +218,18 @@ they were found.
 ### `RayService` vs. `Service` — two different layers
 
 Worth being precise about this, since the names collide: **`Service`** is a native Kubernetes object — a
-stable network endpoint (virtual IP + DNS name) routing to pods matching a label selector, no different
-from `kubernetes` (the API server's own Service) or any plain Kubernetes app. **`RayService`** is a Custom
+stable network endpoint (virtual IP + DNS name) routing to pods matching a label selector. There's nothing
+Ray-specific about it; it's the exact same kind of object you'd create for any Kubernetes app. **`RayService`**
+is a Custom
 Resource Definition (CRD) that only exists because KubeRay's operator defines it — the high-level thing we
 actually author in `ray-service-sample.yaml` ("run this cluster, deploy this Serve app").
 
 One `RayService` object causes KubeRay's operator to automatically generate several real Kubernetes objects
 on our behalf: a `RayCluster` object, the actual head/worker pods, and multiple `Service` objects —
 including `rayservice-vllm-serve-svc`, the stable-named one actually used for traffic. That one specifically
-only gets created once the Serve app reports healthy — its *absence* during the earlier debugging was itself
-a signal the deployment hadn't actually succeeded yet, well before the real error surfaced.
+only gets created once the Serve app reports healthy — worth keeping in mind for the three-bug deployment
+chain that follows: its *absence* was itself a useful signal that the deployment hadn't actually succeeded
+yet, ahead of whatever error message eventually surfaced.
 
 `kubectl get rayservice` shows Ray-specific summary info (`SERVICE STATUS`, `NUM SERVE ENDPOINTS`) that
 plain Kubernetes has no concept of — KubeRay computes and reports that itself. `kubectl get svc` only ever
@@ -233,12 +272,21 @@ deployment_config={
 `ray_actor_options` turns out to be exactly phase 3's familiar pattern (`num_cpus`, `num_gpus`) — just nested
 one level inside `deployment_config` instead of being its own top-level field. Required a full rebuild and
 repush of the image, since the bug was in `serve_vllm.py` itself, baked into the image at build time — not
-something a manifest-only fix could resolve.
+something a manifest-only fix could resolve. No new commands, just a re-run of the same build/push step from
+earlier, since `serve_vllm.py` gets `COPY`'d into the image at build time:
+
+```bash
+./scripts/build_and_push_to_ecr.sh
+```
 
 ### A second, subtler bug: asking for the same GPU twice
 
 That fix got past the config validation error, but the deployment then sat stuck at `DEPLOYING` indefinitely
 — no error, no crash, just permanently pending. `ray status` on the head pod revealed why:
+
+```bash
+kubectl exec <head-pod> -c ray-head -- ray status
+```
 
 ```
 Usage:
@@ -338,8 +386,13 @@ not just idling with memory allocated:
 ### Why `LLMRouter` gets 2 replicas by default
 
 Worth explaining rather than just noting: `LLMRouter` defaulting to 2 replicas (while the actual model,
-`LLMDeployment:qwen-0_5b`, has 1) isn't arbitrary — Ray recommends a 2:1 ratio of router replicas to model
-replicas specifically so the router layer itself can't become the bottleneck under concurrent load. The
+`LLMDeployment:qwen-0_5b`, has 1) isn't arbitrary — confirmed directly in the pinned `ray-2.44.0` source
+([`constants.py`](https://github.com/ray-project/ray/blob/ray-2.44.0/python/ray/llm/_internal/serve/configs/constants.py#L70-L73)),
+not "latest" docs, which already use different terminology (`num_ingress_replicas`) for what this version
+still calls `ROUTER_TO_MODEL_REPLICA_RATIO`: a hardcoded 2:1 ratio of router replicas to model replicas,
+[with the reasoning spelled out in a comment right next to where it's applied](https://github.com/ray-project/ray/blob/ray-2.44.0/python/ray/llm/_internal/serve/deployments/routers/router.py#L426-L428) —
+router replicas are deliberately set to ~2x model replicas "during high concurrency situation," specifically
+so the router layer itself can't become the bottleneck under concurrent load. The
 router does real CPU work per request (parsing the incoming JSON, applying the chat template, translating
 between the OpenAI API shape and vLLM's internal format, then load-balancing to a model replica via the
 same "power of two choices" routing strategy from [phase 2's router-timing
@@ -347,18 +400,20 @@ investigation](../02-num-replicas/README.md)) — with only one router process, 
 requests before they ever reach the model, even if the model replica itself has headroom.
 
 Ground truth that both routers are genuinely handling live traffic, not just one sitting idle — each
-replica's own logs show real `POST /v1/chat/completions` entries from the same benchmark run:
+replica's own logs show real `POST /v1/chat/completions` entries, captured during the concurrency benchmark
+described next (see [Benchmark methodology](#benchmark-methodology) and [Results](#results)):
 
 ![LLMRouter replica shghgfb5's logs showing POST /v1/chat/completions entries](dashboard/replica-shghgfb5-log.png)
 ![LLMRouter replica 4a9m7ue1's logs showing POST /v1/chat/completions entries](dashboard/replica-4a9m7ue1-log.png)
 
-Sources: [Architecture overview — Ray Serve](https://docs.ray.io/en/latest/serve/llm/architecture/overview.html),
-[Request routing — Ray Serve](https://docs.ray.io/en/latest/serve/llm/architecture/routing-policies.html)
-
 ## Benchmark methodology
 
 The sweep fires 1, 2, 4, 8, and 16 truly concurrent requests at a single replica, for each engine, and
-records per-level throughput (requests/sec) and average latency. A few deliberate design choices:
+records per-level throughput (requests/sec) and average latency. This is the HF-vs-vLLM comparison covered
+in [Results](#results) below; the same `benchmark.py` script gets reused later with a much wider concurrency
+range (up to 256) for the 1-vs-2-replica saturation study in [Scaling to 2 GPU
+workers](#scaling-to-2-gpu-workers) — same methodology, same script, different question. A few deliberate
+design choices:
 
 - **A pool of distinct prompts, cycled across requests — not one repeated prompt.** vLLM automatically
   caches shared prompt prefixes; hammering it with the exact same prompt over and over would make it look
@@ -375,10 +430,15 @@ Script: [`scripts/benchmark.py`](scripts/benchmark.py). Run once per engine — 
 [Deploying](#deploying) above) only one engine can actually be running at a time on the single GPU worker:
 
 ```bash
-# while phase 3's HF deployment is the one currently running:
-python benchmark.py --engine hf   --url http://localhost:8000/generate            --out results_hf.json
+# 1. HF baseline (phase 3's existing manifest, unmodified — reused, not duplicated)
+kubectl apply -f ../03-aws-eks/ray-service-sample.yaml
+# wait for Running, port-forward, then:
+python benchmark.py --engine hf --url http://localhost:8000/generate --out results_hf.json
+kubectl delete -f ../03-aws-eks/ray-service-sample.yaml
 
-# after tearing that down and deploying this phase's vLLM manifest instead:
+# 2. vLLM (this phase's manifest)
+kubectl apply -f ray-service-sample.yaml
+# wait for Running, port-forward, then:
 python benchmark.py --engine vllm --url http://localhost:8000/v1/chat/completions --out results_vllm.json
 ```
 
@@ -405,31 +465,14 @@ requests to one replica are handled strictly one at a time, so throughput is cap
 1 ÷ (single-request latency) no matter how many requests pile up. vLLM's continuous batching instead packs
 concurrent requests into shared GPU forward passes, so throughput keeps climbing as concurrency rises.
 
-Worth being honest about a wrong prediction: this doc originally expected a "modest gap, not a dramatic one"
-here, reasoning that a small 0.5B model wouldn't stress the GPU enough for batching's advantage to show up
-strongly. The opposite happened, and there's a plausible reason why: for a model this small, per-request
-fixed overhead (Python/CUDA call overhead, KV cache allocation, no shared batching) is large *relative to*
-the model's own tiny compute cost — so batching multiple requests together, which amortizes that overhead
-across many requests at once, likely helps *more* for a small model than a large one, not less. That's a
-plausible explanation, not a confirmed one — the actual mechanism would need profiling to verify — but it's
-a more interesting finding than the "wait for a bigger model" expectation originally written here.
+A small model like this one turns out to benefit *more* from batching than a large one might, not less:
+per-request fixed overhead (Python/CUDA call overhead, KV cache allocation) is large relative to the model's
+own tiny compute cost, so batching multiple requests together — which amortizes that overhead across all of
+them — has more waste to reclaim. That's a plausible explanation, not a confirmed one; the actual mechanism
+would need profiling to verify.
 
-Phase 5 (same vLLM setup, a meaningfully larger model) is still worth doing — just not to *find* a gap that
-turned out to already exist, but to see whether it holds, shrinks, or grows once per-request compute time
-actually dominates over fixed overhead.
-
-## Tying this back
-
-The most direct link to the original capstone's analysis is **paged attention specifically** — that project's
-KV-cache/roofline work looked at single-GPU inference efficiency in depth; paged attention is vLLM's actual
-production answer to the KV-cache memory problem that analysis was reasoning about, just applied at the
-serving-engine level instead of the single-request level. Where that project measured how efficiently one
-request uses a GPU's memory and compute, this phase measures a complementary axis: how many *concurrent*
-requests a serving engine can sustain before it runs out of room — continuous batching and paged attention
-are precisely the two mechanisms that push that ceiling higher.
-
-*(Placeholder — fill in the specific TTFT/TPOT/roofline numbers from the original capstone once at hand, to
-make the comparison concrete rather than conceptual.)*
+Phase 5 (same vLLM setup, a meaningfully larger model) is worth doing to see whether this pattern holds,
+shrinks, or grows once per-request compute time actually dominates over fixed overhead.
 
 ## Scaling to 2 GPU workers
 
@@ -442,22 +485,47 @@ autoscaling layers** to deal with, not one:
    *replicas* of `LLMDeployment:qwen-0_5b` to run, based on observed request queue depth. This is completely
    separate from layer 1 — it can only ever use nodes that already exist.
 
-After scaling the node group to 2 GPU nodes (`scripts/scale-up-gpu-workers.sh`) and forcing
-`workerGroupSpecs.replicas: 2` (layer 1 stalled for 14+ minutes despite `ray status` showing clear pending
-demand — a genuine, unresolved finding, not chased further here), both GPU pods came up fine. But layer 2
-turned out to be its own source of flakiness: with `autoscaling_config: {min_replicas: 1, max_replicas: 2}`,
-the second Serve replica only activates under *sustained* load (took ~14 minutes of continuous 16-concurrent
-traffic the first time), and scales back down to 1 replica within minutes of that load stopping. A short
-`benchmark.py` sweep (~3-4 seconds total) doesn't generate enough sustained demand on its own to trigger
-scale-up, and can easily get caught mid-scale-down — which is exactly what invalidated two earlier benchmark
-attempts against a "2-replica" deployment that, per the dashboard, actually only had 1 active replica the
-whole time.
+**Layer 1.** After scaling the node group to 2 GPU nodes (`scripts/scale-up-gpu-workers.sh`), the core
+cluster autoscaler stalled for 14+ minutes despite `ray status` showing clear pending demand — a genuine,
+unresolved finding, not chased further here (from contemporaneous notes at the time, not an archived
+`ray status`/log capture). Worked around it by forcing `workerGroupSpecs.replicas: 2` directly, bypassing the
+stalled autoscaler; both GPU pods came up fine from there.
 
-The permanent fix is to pin a static `num_replicas: 2` instead of relying on autoscaling for a controlled
-benchmark — an image with that change is built and pushed, not yet deployed as of this writing. For the
-actual measurement below, a sustained-load generator was run against the still-autoscaling deployment until
-the dashboard confirmed 2 replicas active, and the benchmark was fired immediately after, before the idle
-scale-down window closed.
+**Layer 2.** This one turned out to be its own source of flakiness. With
+`autoscaling_config: {min_replicas: 1, max_replicas: 2}`, the second Serve replica only activates under
+*sustained* load — it took ~14 minutes of continuous 16-concurrent traffic the first time — and scales back
+down to 1 replica within minutes of that load stopping. A short `benchmark.py` sweep (~3-4 seconds total)
+doesn't generate enough sustained demand on its own to trigger scale-up, and can easily get caught
+mid-scale-down. That's exactly what happened, twice: two separate attempts to benchmark the "2-replica"
+deployment both produced numbers nearly identical to the 1-replica baseline — suspiciously flat, given the
+whole point was to see a difference. Both times, checking the dashboard's Serve tab and `kubectl get pods`
+showed only 1 active Serve replica during the actual test window; the second pod existed at the Kubernetes
+level, but Serve's own autoscaler hadn't activated it yet when the benchmark ran. The first mislabeled
+results file was deleted outright once this was confirmed; the second attempt is what led to deliberately
+generating sustained load first (see below) to force the second replica active *before* benchmarking, rather
+than hoping it happened to be up already.
+
+For the actual measurement below, a sustained-load generator was run against the deployment's
+`autoscaling_config` until the dashboard confirmed 2 replicas active, and the benchmark was fired immediately
+after, before the idle scale-down window closed.
+
+**Recap, since three different layers were involved:**
+
+#### Node count
+
+2 real EC2 instances now exist in the `gpu-worker` node group, via `scripts/scale-up-gpu-workers.sh`. A
+Kubernetes/AWS-level change, independent of anything Ray-specific.
+
+#### Pod count
+
+Forced directly to 2 via `workerGroupSpecs.replicas: 2` in the RayCluster spec — not something that happened
+on its own. This is exactly the step Ray's own core cluster autoscaler (layer 1) should have handled
+automatically, but stalled on.
+
+#### Serve replica count
+
+Sustained load triggered Ray Serve's own deployment-level autoscaler (layer 2, `autoscaling_config`), scaling
+`LLMDeployment:qwen-0_5b` from 1 replica to 2.
 
 Ground truth that both replicas were genuinely live and splitting traffic:
 
@@ -466,7 +534,7 @@ Ground truth that both replicas were genuinely live and splitting traffic:
 ![Replica log for 6hjb66ns showing POST /v1/chat/completions calls at the same timestamp](dashboard/scaling/replica-6hjb66ns-log-load-test-traffic.png)
 ![Cluster tab showing both GPU workers under load simultaneously (62% and 77% utilization)](dashboard/scaling/cluster-tab-both-replicas-under-load.png)
 
-### Finding the saturation point
+### Finding vLLM's saturation point
 
 A single vLLM replica turned out not to be the bottleneck at the original benchmark's concurrency levels
 (1-16) — its latency stayed almost flat across that whole range (0.65s → 0.92s), meaning continuous batching
@@ -474,13 +542,17 @@ was absorbing the extra concurrent requests without breaking a sweat. With headr
 2 replicas couldn't show any measurable benefit yet — so the sweep was extended to higher concurrency to find
 where a single replica actually saturates, and confirm 2 replicas keep scaling past that point.
 
+#### Side note: a dip that didn't reproduce
+
 The first run at these levels showed an odd dip at concurrency 128 (32.6 req/s, below 64's 35.0) that did
 *not* reproduce in an immediate re-run (128 came back at 40.7 req/s, above 64 as expected) — a reminder that
 a single sample at high concurrency is noisy (likely `kubectl port-forward` tunnel jitter, not a real system
-characteristic). The table below uses the reproducible re-run's numbers, alongside the matching 1-replica
-sweep run right after Serve's autoscaler happened to scale back down to 1 replica:
+characteristic). The table below uses the reproducible re-run's numbers.
 
-| Concurrency | 1-replica throughput (req/s) | 1-replica latency avg (s) | 2-replica throughput (req/s) | 2-replica latency avg (s) |
+The table also includes the matching 1-replica sweep, run right after Serve's autoscaler happened to scale
+back down to 1 replica:
+
+| Concurrency | 1-replica (vLLM) throughput (req/s) | 1-replica (vLLM) latency avg (s) | 2-replica (vLLM) throughput (req/s) | 2-replica (vLLM) latency avg (s) |
 |---|---|---|---|---|
 | 1   | 1.53  | 0.65 | 1.53  | 0.65 |
 | 2   | 2.98  | 0.67 | 2.92  | 0.68 |
