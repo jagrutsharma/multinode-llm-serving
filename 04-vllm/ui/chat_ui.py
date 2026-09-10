@@ -1,13 +1,23 @@
 import gradio as gr
 from openai import OpenAI
 
-# Assumes: kubectl port-forward svc/rayservice-sample-serve-svc 8000:8000
+# Assumes: kubectl port-forward svc/rayservice-vllm-serve-svc 8000:8000
 # ray.serve.llm exposes an OpenAI-compatible API, so the OpenAI client works directly --
 # api_key is unchecked by our endpoint (no auth configured) but the client requires a
 # non-empty string.
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
 
 MODEL_ID = "qwen-0.5b"  # must match model_loading_config.model_id in serve_vllm.py
+
+
+def extract_content(content):
+    # Gradio's "messages" format sometimes stores content as a list of content-part
+    # dicts (e.g. [{"type": "text", "text": "..."}]), mirroring OpenAI's multimodal
+    # content-parts shape -- but ray.serve.llm's server-side Message model only
+    # accepts a plain string. Flatten back down to text.
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return content
 
 
 def to_messages(history):
@@ -18,12 +28,12 @@ def to_messages(history):
     messages = []
     for turn in history:
         if isinstance(turn, dict):
-            messages.append(turn)
+            messages.append({"role": turn["role"], "content": extract_content(turn["content"])})
         else:
             user_msg, bot_msg = turn
-            messages.append({"role": "user", "content": user_msg})
+            messages.append({"role": "user", "content": extract_content(user_msg)})
             if bot_msg is not None:
-                messages.append({"role": "assistant", "content": bot_msg})
+                messages.append({"role": "assistant", "content": extract_content(bot_msg)})
     return messages
 
 

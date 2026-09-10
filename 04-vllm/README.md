@@ -517,6 +517,18 @@ same session.
 ```bash
 cd ui
 pip install -r requirements.txt
-kubectl port-forward svc/rayservice-sample-serve-svc 8000:8000   # separate terminal, keep running
+kubectl port-forward svc/rayservice-vllm-serve-svc 8000:8000   # separate terminal, keep running
 ./run_ui.sh
 ```
+
+One real bug surfaced on first live test: Gradio's `ChatInterface` history sometimes stores message `content`
+as a list of content-part dicts (`[{"type": "text", "text": "..."}]`, mirroring OpenAI's multimodal
+content-parts shape) rather than a plain string. `ray.serve.llm`'s server-side `Message` model only accepts
+`content: str | None`, so resending that shape on the second turn threw a `pydantic` validation error
+(`Value error, content must be a string or None`) — visible only in the replica's **STDERR** log tab, not the
+access-log "Serve Logger" tab used everywhere else in this doc. Fixed by flattening content back to a plain
+string in `to_messages()` regardless of which shape it arrives in.
+
+Confirmed working — the model correctly tracks context across three turns without repeating "West Coast":
+
+![Multi-turn conversation: West Coast vacation planning across 3 turns, context maintained throughout](dashboard/chat-ui-multiturn-conversation.png)
