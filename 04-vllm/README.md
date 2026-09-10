@@ -461,10 +461,10 @@ scale-down window closed.
 
 Ground truth that both replicas were genuinely live and splitting traffic:
 
-![Ray Serve tab showing LLMDeployment:qwen-0_5b at 2/2 replicas](dashboard/serve-tab-2-of-2-replicas-active.png)
-![Replica log for 53f69n8m showing POST /v1/chat/completions calls](dashboard/replica-53f69n8m-log-load-test-traffic.png)
-![Replica log for 6hjb66ns showing POST /v1/chat/completions calls at the same timestamp](dashboard/replica-6hjb66ns-log-load-test-traffic.png)
-![Cluster tab showing both GPU workers under load simultaneously (62% and 77% utilization)](dashboard/cluster-tab-both-replicas-under-load.png)
+![Ray Serve tab showing LLMDeployment:qwen-0_5b at 2/2 replicas](dashboard/scaling/serve-tab-2-of-2-replicas-active.png)
+![Replica log for 53f69n8m showing POST /v1/chat/completions calls](dashboard/scaling/replica-53f69n8m-log-load-test-traffic.png)
+![Replica log for 6hjb66ns showing POST /v1/chat/completions calls at the same timestamp](dashboard/scaling/replica-6hjb66ns-log-load-test-traffic.png)
+![Cluster tab showing both GPU workers under load simultaneously (62% and 77% utilization)](dashboard/scaling/cluster-tab-both-replicas-under-load.png)
 
 ### Finding the saturation point
 
@@ -499,8 +499,8 @@ hard: **1-replica throughput plateaus and gets noisy** (15.4 → 19.4 → 22.0 �
 with latency growing far more gently. That divergence — not just the 2-replica curve in isolation — is the
 actual proof that a second replica extends the system's capacity rather than just adding idle redundancy.
 
-![Throughput vs concurrency: 1 vs 2 replicas, lines overlap through 16 then split hard](dashboard/replica_scaling_throughput.png)
-![Latency under load: 1 replica balloons to 6.4s at concurrency 256, 2 replicas stay at 3.5s](dashboard/replica_scaling_latency.png)
+![Throughput vs concurrency: 1 vs 2 replicas, lines overlap through 16 then split hard](dashboard/scaling/replica_scaling_throughput.png)
+![Latency under load: 1 replica balloons to 6.4s at concurrency 256, 2 replicas stay at 3.5s](dashboard/scaling/replica_scaling_latency.png)
 
 ## Bonus: a small chat UI
 
