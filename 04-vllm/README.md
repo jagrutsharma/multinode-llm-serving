@@ -146,7 +146,8 @@ this heavy. Bumped the limit in Docker Desktop's **Settings → Resources → Ad
 80GB (a GUI-only setting, not exposed via the `docker` CLI), reconfirmed via the same `alpine df -h /` check
 (now 53.8GB free), and retried the build from there.
 
-*(Build outcome/timing to fill in once the retry finishes.)*
+The retry succeeded from there — same ~36.7GB freed by the cache/image cleanup plus the larger virtual disk
+limit gave the install enough headroom to finish without further disk pressure.
 
 ## Deploying
 
@@ -432,8 +433,74 @@ make the comparison concrete rather than conceptual.)*
 
 ## Scaling to 2 GPU workers
 
-*(To fill in — mirrors phase 3's own "Scaling to 2 GPU workers" section: `scripts/scale-up-gpu-workers.sh`,
-bump `max_replicas` to 2, confirm cross-node load-balancing, same as before.)*
+Mirrors phase 3's own "Scaling to 2 GPU workers" step, but this time there are **two independent
+autoscaling layers** to deal with, not one:
+
+1. **Ray's core cluster autoscaler** — decides whether to request a new *node* from Kubernetes, based on
+   unmet resource demand from pending placement groups.
+2. **Ray Serve's deployment-level autoscaler** (`deployment_config.autoscaling_config`) — decides how many
+   *replicas* of `LLMDeployment:qwen-0_5b` to run, based on observed request queue depth. This is completely
+   separate from layer 1 — it can only ever use nodes that already exist.
+
+After scaling the node group to 2 GPU nodes (`scripts/scale-up-gpu-workers.sh`) and forcing
+`workerGroupSpecs.replicas: 2` (layer 1 stalled for 14+ minutes despite `ray status` showing clear pending
+demand — a genuine, unresolved finding, not chased further here), both GPU pods came up fine. But layer 2
+turned out to be its own source of flakiness: with `autoscaling_config: {min_replicas: 1, max_replicas: 2}`,
+the second Serve replica only activates under *sustained* load (took ~14 minutes of continuous 16-concurrent
+traffic the first time), and scales back down to 1 replica within minutes of that load stopping. A short
+`benchmark.py` sweep (~3-4 seconds total) doesn't generate enough sustained demand on its own to trigger
+scale-up, and can easily get caught mid-scale-down — which is exactly what invalidated two earlier benchmark
+attempts against a "2-replica" deployment that, per the dashboard, actually only had 1 active replica the
+whole time.
+
+The permanent fix is to pin a static `num_replicas: 2` instead of relying on autoscaling for a controlled
+benchmark — an image with that change is built and pushed, not yet deployed as of this writing. For the
+actual measurement below, a sustained-load generator was run against the still-autoscaling deployment until
+the dashboard confirmed 2 replicas active, and the benchmark was fired immediately after, before the idle
+scale-down window closed.
+
+Ground truth that both replicas were genuinely live and splitting traffic:
+
+![Ray Serve tab showing LLMDeployment:qwen-0_5b at 2/2 replicas](dashboard/serve-tab-2-of-2-replicas-active.png)
+![Replica log for 53f69n8m showing POST /v1/chat/completions calls](dashboard/replica-53f69n8m-log-load-test-traffic.png)
+![Replica log for 6hjb66ns showing POST /v1/chat/completions calls at the same timestamp](dashboard/replica-6hjb66ns-log-load-test-traffic.png)
+![Cluster tab showing both GPU workers under load simultaneously (62% and 77% utilization)](dashboard/cluster-tab-both-replicas-under-load.png)
+
+### Finding the saturation point
+
+A single vLLM replica turned out not to be the bottleneck at the original benchmark's concurrency levels
+(1-16) — its latency stayed almost flat across that whole range (0.65s → 0.92s), meaning continuous batching
+was absorbing the extra concurrent requests without breaking a sweat. With headroom left on a single replica,
+2 replicas couldn't show any measurable benefit yet — so the sweep was extended to higher concurrency to find
+where a single replica actually saturates, and confirm 2 replicas keep scaling past that point.
+
+The first run at these levels showed an odd dip at concurrency 128 (32.6 req/s, below 64's 35.0) that did
+*not* reproduce in an immediate re-run (128 came back at 40.7 req/s, above 64 as expected) — a reminder that
+a single sample at high concurrency is noisy (likely `kubectl port-forward` tunnel jitter, not a real system
+characteristic). The table below uses the reproducible re-run's numbers, alongside the matching 1-replica
+sweep run right after Serve's autoscaler happened to scale back down to 1 replica:
+
+| Concurrency | 1-replica throughput (req/s) | 1-replica latency avg (s) | 2-replica throughput (req/s) | 2-replica latency avg (s) |
+|---|---|---|---|---|
+| 1   | 1.53  | 0.65 | 1.53  | 0.65 |
+| 2   | 2.98  | 0.67 | 2.92  | 0.68 |
+| 4   | 5.49  | 0.73 | 5.45  | 0.71 |
+| 8   | 9.49  | 0.78 | 11.15 | 0.71 |
+| 16  | 16.74 | 0.93 | 17.94 | 0.81 |
+| 32  | 15.39 | 1.42 | 31.43 | 0.95 |
+| 64  | 19.40 | 2.14 | 35.81 | 1.32 |
+| 128 | 21.97 | 3.52 | 40.66 | 2.04 |
+| 256 | 20.82 | 6.40 | 45.01 | 3.53 |
+
+Through concurrency 16, the two are essentially tied — consistent with the earlier finding that a single
+replica wasn't saturated yet at that level, so a second replica had nothing to relieve. Past 16 they split
+hard: **1-replica throughput plateaus and gets noisy** (15.4 → 19.4 → 22.0 → 20.8, never breaking much past
+~20 req/s) while its **latency balloons 7x** (0.93s → 6.40s). **2-replica keeps scaling cleanly** to 45 req/s,
+with latency growing far more gently. That divergence — not just the 2-replica curve in isolation — is the
+actual proof that a second replica extends the system's capacity rather than just adding idle redundancy.
+
+![Throughput vs concurrency: 1 vs 2 replicas, lines overlap through 16 then split hard](dashboard/replica_scaling_throughput.png)
+![Latency under load: 1 replica balloons to 6.4s at concurrency 256, 2 replicas stay at 3.5s](dashboard/replica_scaling_latency.png)
 
 ## Bonus: a small chat UI
 

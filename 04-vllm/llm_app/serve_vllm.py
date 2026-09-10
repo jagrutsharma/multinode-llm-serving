@@ -13,10 +13,7 @@ llm_config = LLMConfig(
         "ray_actor_options": {
             "num_cpus": 1,
         },
-        "autoscaling_config": {
-            "min_replicas": 1,
-            "max_replicas": 1,
-        },
+        "num_replicas": 2,
     },
 )
 
