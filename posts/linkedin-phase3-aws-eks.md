@@ -1,8 +1,11 @@
 <!--
+Status: POSTED 2026-09-03 — https://www.linkedin.com/feed/update/urn:li:activity:7501509934304567296/
+
 Images to attach when posting (LinkedIn supports multiple, shown as a carousel):
-1. ../03-aws-eks/dashboard/scaling/dual-gpu-concurrent-util.png — nvidia-smi polled with timestamps on two
+1. linkedin-phase3-architecture.png (this folder) — request-flow architecture diagram, 2 real GPU nodes
+2. ../03-aws-eks/dashboard/scaling/dual-gpu-concurrent-util.png — nvidia-smi polled with timestamps on two
    separate GPU nodes, both showing non-zero utilization at the same moment
-2. ../03-aws-eks/dashboard/inf-req-resp.png — real curl request/response from the deployed model
+3. ../03-aws-eks/dashboard/inf-req-resp.png — real curl request/response from the deployed model
 -->
 
 Last post ended with "next up: the same setup, real GPUs." Here's that.

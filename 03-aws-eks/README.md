@@ -11,8 +11,14 @@ Unlike phases 1-2, this one costs real money the moment the cluster is up (EKS c
 `t3.medium` `~$0.04/hr` + `g4dn.xlarge` `~$0.53/hr` On-Demand ≈ `~$0.67/hr` while running) — worth tearing down
 between sessions rather than leaving it running the way we did with the free local k3d cluster.
 
+*eksctl doesn't know Ray exists; `rayClusterConfig` doesn't know what the model does; `serveConfigV2`
+doesn't know or care that its "GPU" is a `g4dn.xlarge` in `us-east-1`.* This phase's config spans three such
+layers, each trusting the one below it to have already provisioned what it's asking for — see
+[Three layers of configuration](#three-layers-of-configuration) for the full breakdown.
+
 ## Contents
 
+- [Architecture: request flow across 2 GPU workers](#architecture-request-flow-across-2-gpu-workers)
 - [Three layers of configuration](#three-layers-of-configuration)
 - [Setting up the cluster](#setting-up-the-cluster)
   - [Cluster setup with `eksctl`](#cluster-setup-with-eksctl)
@@ -32,17 +38,86 @@ between sessions rather than leaving it running the way we did with the free loc
   - [Direct proof: `nvidia-smi` on both worker pods](#direct-proof-nvidia-smi-on-both-worker-pods)
 - [Bonus: a small chat UI](#bonus-a-small-chat-ui)
 
+## Architecture: request flow across 2 GPU workers
+
+Same request-router shape as [phase 2](../02-num-replicas/README.md#architecture-request-flow-with-2-replicas),
+but the workers are no longer k3d pods sharing one laptop's CPU — they're two separate `g4dn.xlarge` EC2
+instances, each with its own physical T4 GPU:
+
+```mermaid
+flowchart LR
+    Client["Your machine<br/>(curl / chat UI)"]
+
+    subgraph EKS["AWS EKS cluster: raylab-eks"]
+        PF["kubectl port-forward<br/>localhost:8000 → svc:8000"]
+        SVC["Service<br/>rayservice-sample-serve-svc<br/>(ClusterIP)"]
+
+        subgraph HEAD["Head pod — t3.medium (num-cpus: 0)"]
+            Proxy["ProxyActor<br/>+ request router"]
+            Controller["ServeController<br/>(deployment lifecycle only)"]
+        end
+
+        subgraph WORKER1["GPU worker pod 1 — g4dn.xlarge, EC2 instance A"]
+            Proxy1["ProxyActor"]
+            ReplicaA["ServeReplica A<br/>llm_app:QwenChat<br/>(Qwen2.5-0.5B-Instruct, T4 GPU)"]
+        end
+
+        subgraph WORKER2["GPU worker pod 2 — g4dn.xlarge, EC2 instance B"]
+            Proxy2["ProxyActor"]
+            ReplicaB["ServeReplica B<br/>llm_app:QwenChat<br/>(Qwen2.5-0.5B-Instruct, T4 GPU)"]
+        end
+    end
+
+    Client -->|"POST /generate"| PF
+    PF --> SVC
+    SVC --> Proxy
+    Proxy -->|"router picks least-loaded replica"| ReplicaA
+    Proxy -.->|"or"| ReplicaB
+    ReplicaA -->|"generated text"| Proxy
+    ReplicaB -.->|"generated text"| Proxy
+    Proxy -->|"200 OK JSON"| PF
+    PF --> Client
+```
+
+The router's job is the same as phase 2's — pick the least-loaded replica per request — but now that decision
+actually spans two separate machines, not two pods time-sliced on one CPU. See
+[Proving requests spread across both GPU nodes](#proving-requests-spread-across-both-gpu-nodes) for the real
+log evidence that this happens correctly.
+
+### Request sequence: one call, step by step
+
+The flowchart above shows the static shape; this shows the *order* a single request actually moves through it,
+including where GPU compute actually happens (the one step phases 1-2 never had):
+
+```mermaid
+sequenceDiagram
+    participant C as Your machine
+    participant PF as kubectl port-forward
+    participant Svc as Service (ClusterIP)
+    participant Proxy as ProxyActor (head pod)
+    participant R as ServeReplica (GPU worker pod)
+
+    C->>PF: POST /generate {"prompt": "..."}
+    PF->>Svc: forward
+    Svc->>Proxy: forward
+    Proxy->>Proxy: pick least-loaded replica
+    Proxy->>R: dispatch request
+    R->>R: tokenize → .to("cuda") → model.generate() on T4 → decode
+    R-->>Proxy: generated text
+    Proxy-->>Svc: 200 OK JSON
+    Svc-->>PF: forward
+    PF-->>C: response
+```
+
 ## Three layers of configuration
 
-*eksctl doesn't know Ray exists; `rayClusterConfig` doesn't know what the model does; `serveConfigV2`
-doesn't know or care that its "GPU" is a `g4dn.xlarge` in `us-east-1`.*
-
-This phase's config spans three layers, each answering a different question, each trusting the one below
-it to have already provisioned what it's asking for:
+Each layer answers a different question, trusting the one below it to have already provisioned what it's
+asking for:
 
 - **`eksctl-cluster.yaml`** — the real hardware ceiling. Talks to AWS, not Ray or Kubernetes. Decides what
-  EC2 instances actually exist (`t3.medium`, `g4dn.xlarge`), how many, and what labels they carry. Nothing
-  in the layers below can conjure resources that don't exist here.
+  EC2 instances actually exist ([`t3.medium`](https://aws.amazon.com/ec2/instance-types/t3/),
+  [`g4dn.xlarge`](https://aws.amazon.com/ec2/instance-types/g4/)), how many, and what labels they carry.
+  Nothing in the layers below can conjure resources that don't exist here.
 - **`rayClusterConfig`** — Kubernetes pod specs, not "Ray handing out resources." Describes containers
   (image, `resources.requests`/`limits`, `nodeSelector`) that
   [`kube-scheduler`](https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/) places onto
@@ -119,6 +194,8 @@ instances) and means we won't need to touch the node group again when we get to 
 eksctl create cluster -f eksctl-cluster.yaml
 ```
 
+(run 2026-08-31, same day the quota approval above landed)
+
 (wrapped as [`scripts/create-eks-cluster.sh`](scripts/create-eks-cluster.sh))
 
 Took ~17 minutes. The AWS console confirms the same two node groups `kubectl` sees — real EC2 instances,
@@ -143,8 +220,18 @@ is what makes `nvidia.com/gpu` show up as a schedulable resource at all. Without
 NVIDIA's driver can talk to it, but Kubernetes itself has no way to know or to let a pod request it.
 
 `eksctl` detected the GPU instance type, picked the GPU-optimized AMI automatically, and installed the
-`nvidia-device-plugin-daemonset` for us. Confirmed for real (not just that the DaemonSet exists) by checking
-the node's actual advertised capacity:
+`nvidia-device-plugin-daemonset` for us. Confirmed exactly which AMI by checking the node directly —
+**Amazon Linux 2023** (`ami-06e7b4d36d631adc5`, kernel `6.1.182-227.379.amzn2023.x86_64`), EKS's
+`AL2023_x86_64_NVIDIA` managed-node-group AMI type, the current default for GPU node groups on EKS 1.31 (the
+older `AL2_x86_64_GPU` Amazon Linux 2 AMI is being phased out):
+
+```
+$ kubectl get nodes -l role=gpu-worker -o jsonpath='{.items[0].status.nodeInfo.osImage}'
+Amazon Linux 2023.12.20260831
+```
+
+Also confirmed for real (not just that the DaemonSet exists) by checking the node's actual advertised
+capacity:
 
 ```
 $ kubectl describe node -l role=gpu-worker
@@ -238,13 +325,29 @@ model line was missing `torch_dtype`/`.to("cuda")` entirely while the inputs lin
   `resources.limits."nvidia.com/gpu": "1"` on the container (which KubeRay translates into a `--num-gpus` flag
   on the underlying `ray start` command), this tells Ray's scheduler the replica needs a GPU, not just CPU.
 
+Worth being explicit about where the actual `cpu`/`memory`/`nvidia.com/gpu` *numbers* in that `resources`
+block come from, since it isn't obvious: **nowhere automatic.** `eksctl-cluster.yaml` only picks the EC2
+instance type (`g4dn.xlarge` — a fixed AWS spec of 4 vCPU, 16GB memory, 1 GPU); it has no concept of
+per-pod resource requests, and there's no tooling that reads that instance type and auto-fills the manifest's
+`resources` block. That's a manual step — you look up the instance type's spec yourself and choose pod-level
+values that fit underneath it, leaving headroom for the node's own overhead (kubelet, kube-proxy, the CNI
+plugin, and the device-plugin DaemonSet itself all take a slice before your pod is ever scheduled — the true
+number is always a bit less than the raw instance spec, visible via `kubectl describe node`'s "Allocatable"
+section). Our GPU worker's `requests: {cpu: 2, memory: 8Gi, nvidia.com/gpu: 1}` /
+`limits: {cpu: 3, memory: 12Gi, nvidia.com/gpu: 1}` leaves ~1 vCPU and ~4GB of that headroom on a 4 vCPU/16GB
+node, and asks for exactly the 1 GPU the instance actually has. Get this wrong — ask for more than a node's
+allocatable capacity — and the pod just sits `Pending` forever, no error, until you `kubectl describe pod` and
+read the failed-scheduling event.
+
 ### A build-time platform-mismatch warning
 
-Docker flagged `InvalidBaseImagePlatform` while building on an Apple Silicon (arm64) Mac, since its build
-target defaults to the host's architecture unless told otherwise. `rayproject/ray:2.44.0-gpu` only ships `amd64`
-(there's no such thing as an arm64 GPU EC2 instance here), so Docker pulled `amd64` but warned it didn't
-match the arm64 build target — the same category of platform mismatch that caused the arm64/QEMU segfault
-back in phase 1. Fixed by making the target explicit in
+Docker flagged `InvalidBaseImagePlatform` while building on an Apple Silicon (arm64) Mac. Here's why: unless
+told otherwise, Docker builds for whatever architecture the machine you're building on uses — arm64, in this
+case. But `rayproject/ray:2.44.0-gpu` is only published for `amd64` (there's no such thing as an arm64 GPU EC2
+instance, so there's no reason for an arm64 build to exist). Docker pulled the `amd64` image anyway, then
+warned that it didn't match the arm64 target it was about to build for. Same underlying problem as the
+arm64/QEMU segfault back in phase 1: a mismatch between the machine you're building on and the machine the
+image will actually run on. Fixed by making the target explicit in
 [`scripts/build_and_push_to_ecr.sh`](scripts/build_and_push_to_ecr.sh) rather than relying on a default that
 happened to disagree with the base image:
 
@@ -273,18 +376,28 @@ The GPU node was expected to be excluded (it doesn't have `role: head`) — but 
 `nvidia-device-plugin-daemonset` was on that node too, `CrashLoopBackOff`, **126 restarts** over ~10 hours.
 
 **Root cause of the crash-loop.** `kubectl get daemonset nvidia-device-plugin-daemonset -n kube-system -o yaml`
-showed it had no `nodeSelector` — only a *toleration* for the `nvidia.com/gpu` taint, which lets it run on
-GPU nodes but doesn't restrict it to *only* GPU nodes. With no selector at all, it was scheduled onto every
-node in the cluster, including the CPU-only head node, where it found no NVIDIA device and crash-looped
-continuously. A real gap in eksctl's "auto-installed the device plugin for you" convenience from earlier in
-this doc — it installed correctly, but never scoped itself to the `role: gpu-worker` label that was right
-there to use. Each crash/restart cycle left behind enough container/log churn to eventually trip
-`DiskPressure` on the small `t3.medium` volume. Fixed by patching the DaemonSet directly:
+showed the actual gap: the plugin's manifest had a *toleration* for the `nvidia.com/gpu` taint, but no
+`nodeSelector`. Those do different jobs — a toleration only grants *permission* to run on a tainted node; it
+doesn't *restrict* the pod to only that node. Without a selector too, Kubernetes scheduled it onto every node
+in the cluster, including the CPU-only head node, where it found no NVIDIA device and crash-looped
+continuously. Whose gap this is: the NVIDIA device plugin's own default manifest — the one EKS auto-installs
+the moment it sees a GPU instance type — ships this way out of the box, and eksctl's "installed the device
+plugin for you" convenience (from earlier in this doc) doesn't compensate for it. It works fine on a
+GPU-only cluster; it breaks quietly the moment a cluster has genuinely mixed node roles, like this one's
+CPU head + GPU worker split. Each crash/restart cycle left behind enough container/log churn to eventually
+trip `DiskPressure` on the small `t3.medium` volume.
+
+The fix lives on the DaemonSet itself, not in this project's own config — `eksctl-cluster.yaml` and
+`ray-service-sample.yaml` don't manage it, since EKS installs it fresh on every new cluster. That also means
+this patch has to be reapplied by hand each time a cluster is recreated:
 
 ```bash
 kubectl patch daemonset nvidia-device-plugin-daemonset -n kube-system --type merge \
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"role":"gpu-worker"}}}}}'
 ```
+
+Filed upstream as [eksctl#8858](https://github.com/eksctl-io/eksctl/issues/8858), since this is eksctl's own
+auto-install behavior, not something fixable in this project's config.
 
 **Second finding, once the first was fixed — the head pod moved to `ImagePullBackOff`.** Comparing
 `kubectl get node <head-node> -o jsonpath='{.status.capacity.ephemeral-storage} {.status.allocatable.ephemeral-storage}'`
