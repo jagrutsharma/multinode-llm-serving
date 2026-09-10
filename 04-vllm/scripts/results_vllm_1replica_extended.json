@@ -1,0 +1,86 @@
+{
+  "engine": "vllm",
+  "results": [
+    {
+      "concurrency": 1,
+      "batch_duration_s": 0.6538055840064771,
+      "throughput_req_per_s": 1.529506667520437,
+      "latency_avg_s": 0.6536010419949889,
+      "latency_min_s": 0.6536010419949889,
+      "latency_max_s": 0.6536010419949889,
+      "failures": 0
+    },
+    {
+      "concurrency": 2,
+      "batch_duration_s": 0.6706559589947574,
+      "throughput_req_per_s": 2.98215496809689,
+      "latency_avg_s": 0.6703698545170482,
+      "latency_min_s": 0.6702227500500157,
+      "latency_max_s": 0.6705169589840807,
+      "failures": 0
+    },
+    {
+      "concurrency": 4,
+      "batch_duration_s": 0.7284815830062144,
+      "throughput_req_per_s": 5.490873198871079,
+      "latency_avg_s": 0.7280814690020634,
+      "latency_min_s": 0.7276270000147633,
+      "latency_max_s": 0.7284101669793017,
+      "failures": 0
+    },
+    {
+      "concurrency": 8,
+      "batch_duration_s": 0.8429350840160623,
+      "throughput_req_per_s": 9.490647799217191,
+      "latency_avg_s": 0.7813730210109497,
+      "latency_min_s": 0.757104582968168,
+      "latency_max_s": 0.8425389589974657,
+      "failures": 0
+    },
+    {
+      "concurrency": 16,
+      "batch_duration_s": 0.9556733329663984,
+      "throughput_req_per_s": 16.74212248900594,
+      "latency_avg_s": 0.92611299499913,
+      "latency_min_s": 0.8721567090251483,
+      "latency_max_s": 0.9552963339956477,
+      "failures": 0
+    },
+    {
+      "concurrency": 32,
+      "batch_duration_s": 2.0786815829924308,
+      "throughput_req_per_s": 15.394373174718469,
+      "latency_avg_s": 1.4162106366256921,
+      "latency_min_s": 0.9765246249735355,
+      "latency_max_s": 2.077308667008765,
+      "failures": 0
+    },
+    {
+      "concurrency": 64,
+      "batch_duration_s": 3.2994963329983875,
+      "throughput_req_per_s": 19.39689987224219,
+      "latency_avg_s": 2.1392528905798827,
+      "latency_min_s": 1.0272172499680892,
+      "latency_max_s": 3.2919736249605194,
+      "failures": 0
+    },
+    {
+      "concurrency": 128,
+      "batch_duration_s": 5.826095166034065,
+      "throughput_req_per_s": 21.970118295738732,
+      "latency_avg_s": 3.515741796874863,
+      "latency_min_s": 1.0377020830055699,
+      "latency_max_s": 5.816359208023641,
+      "failures": 0
+    },
+    {
+      "concurrency": 256,
+      "batch_duration_s": 12.293237458041403,
+      "throughput_req_per_s": 20.82445742008686,
+      "latency_avg_s": 6.4030435370962095,
+      "latency_min_s": 1.1683770419913344,
+      "latency_max_s": 12.28345074999379,
+      "failures": 0
+    }
+  ]
+}

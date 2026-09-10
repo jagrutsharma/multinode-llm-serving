@@ -292,7 +292,7 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/multinode-llm-serving/r
 ```
 
 (first two lines wrapped as [`scripts/create-ecr-registry.sh`](scripts/create-ecr-registry.sh) and
-[`scripts/auth-local-docker-to-k8s.sh`](scripts/auth-local-docker-to-k8s.sh); last two as
+[`scripts/auth-docker-to-ecr.sh`](scripts/auth-docker-to-ecr.sh); last two as
 [`scripts/build_and_push_to_ecr.sh`](scripts/build_and_push_to_ecr.sh), covered next)
 
 `docker push` is the direct replacement for `k3d image import` — it actually transfers the image's layers

@@ -1,0 +1,50 @@
+{
+  "engine": "hf",
+  "results": [
+    {
+      "concurrency": 1,
+      "batch_duration_s": 1.8190405829809606,
+      "throughput_req_per_s": 0.5497403462880667,
+      "latency_avg_s": 1.818593291041907,
+      "latency_min_s": 1.818593291041907,
+      "latency_max_s": 1.818593291041907,
+      "failures": 0
+    },
+    {
+      "concurrency": 2,
+      "batch_duration_s": 3.4004817500244826,
+      "throughput_req_per_s": 0.5881519581705152,
+      "latency_avg_s": 2.608108771033585,
+      "latency_min_s": 1.8160553750349209,
+      "latency_max_s": 3.4001621670322493,
+      "failures": 0
+    },
+    {
+      "concurrency": 4,
+      "batch_duration_s": 6.540151000022888,
+      "throughput_req_per_s": 0.611606673911046,
+      "latency_avg_s": 4.210945698258001,
+      "latency_min_s": 1.8784911669790745,
+      "latency_max_s": 6.539258833043277,
+      "failures": 0
+    },
+    {
+      "concurrency": 8,
+      "batch_duration_s": 12.910747041983996,
+      "throughput_req_per_s": 0.6196388151657752,
+      "latency_avg_s": 7.3889068332428,
+      "latency_min_s": 1.8487992080044933,
+      "latency_max_s": 12.910068041994236,
+      "failures": 0
+    },
+    {
+      "concurrency": 16,
+      "batch_duration_s": 25.71031941601541,
+      "throughput_req_per_s": 0.6223182116529178,
+      "latency_avg_s": 13.820049635374744,
+      "latency_min_s": 1.8852242910070345,
+      "latency_max_s": 25.70737966703018,
+      "failures": 0
+    }
+  ]
+}
