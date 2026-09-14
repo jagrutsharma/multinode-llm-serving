@@ -1,4 +1,6 @@
 <!--
+Status: POSTED — https://www.linkedin.com/feed/update/urn:li:activity:7503755263942922240/
+
 Images to attach when posting (LinkedIn supports multiple, shown as a carousel):
 1. ../04-vllm/dashboard/throughput_comparison.png — HF flat ~0.6 req/s vs vLLM scaling to 16.8 req/s at concurrency 16
 2. ../04-vllm/dashboard/scaling/replica_scaling_throughput.png — 1 vs 2 vLLM replicas, lines overlap then split hard past concurrency 16
