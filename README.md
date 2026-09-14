@@ -4,6 +4,14 @@ An experimentation project in multi-node LLM serving, moving from a local Kubern
 Each phase is a self-contained folder — its own README, manifests, and (where relevant) architecture notes and
 dashboard walkthroughs — so you can browse or reproduce any phase independently.
 
+## Writeups
+
+I documented this project on LinkedIn as it progressed:
+
+- [Local multi-node serving & the num_replicas scaling investigation](https://www.linkedin.com/posts/jagrutsharma_llminference-kubernetes-kuberay-activity-7500986325144309760-ydou)
+- [Cloud GPU multi-node serving on AWS EKS](https://www.linkedin.com/posts/jagrutsharma_llminference-kubernetes-kuberay-activity-7501509934304567296-DzXk)
+- [vLLM vs HuggingFace Transformers: 27× throughput under concurrency](https://www.linkedin.com/posts/jagrutsharma_llminference-kubernetes-kuberay-activity-7503755263942922240-JnkH)
+
 ## Phases
 
 - **[`01-single-replica/`](01-single-replica/README.md)** — KubeRay + Ray Serve on a local k3d cluster (Apple
