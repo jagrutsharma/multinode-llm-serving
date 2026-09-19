@@ -1,3 +1,8 @@
+<!--
+Image to attach when posting:
+1. ../04-vllm/dashboard/cost_breakdown.png — prefill $0.06 vs decode $1.11, decode ~95% of total cost
+-->
+
 # Why decode dominates the cost of LLM inference
 
 *Published on LinkedIn: [add link after posting]*

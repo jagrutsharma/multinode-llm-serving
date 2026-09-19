@@ -665,6 +665,8 @@ dominates. Here's the breakdown.
 | Prefill | 100,000 | ~1,000 tok/s (parallel, fast) | 0.028 hr | \$0.06 |
 | Decode | 200,000 | 100 tok/s (sequential, slow) | 0.556 hr | \$1.11 |
 
+![Cost breakdown: prefill $0.06 vs decode $1.11, decode ~95% of total cost](dashboard/cost_breakdown.png)
+
 **Decode is ~95% of the cost.** Two compounding reasons:
 1. More tokens (200 output vs 100 input).
 2. Slower per token (sequential decode vs parallel prefill).
