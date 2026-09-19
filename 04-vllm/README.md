@@ -39,6 +39,7 @@ second replica genuinely extends that ceiling — see [Scaling to 2 GPU workers]
 - [Scaling to 2 GPU workers](#scaling-to-2-gpu-workers)
   - [Finding vLLM's saturation point](#finding-vllms-saturation-point)
 - [Bonus: a small chat UI](#bonus-a-small-chat-ui)
+- [Why decode dominates the cost of LLM inference](#why-decode-dominates-the-cost-of-llm-inference)
 
 ## Reusing phase 3's infrastructure
 
@@ -604,3 +605,88 @@ string in `to_messages()` regardless of which shape it arrives in.
 Confirmed working — the model correctly tracks context across three turns without repeating "West Coast":
 
 ![Multi-turn conversation: West Coast vacation planning across 3 turns, context maintained throughout](dashboard/chat-ui-multiturn-conversation.png)
+
+## Why decode dominates the cost of LLM inference
+
+A note on why the throughput numbers in this benchmark matter economically —
+and why decode is where inference cost concentrates.
+
+## The core relationship
+
+On a rented GPU, the hourly cost is fixed whether the GPU is busy or idle. So
+cost per token is set entirely by throughput:
+
+    cost per token = hourly GPU cost ÷ tokens per hour
+
+Double the throughput, halve the cost per token — nothing about the hardware or
+its price changed, only how efficiently it was used.
+
+## A request has two phases with different economics
+
+Serving one request splits into:
+
+- **Prefill** — processes the whole input prompt in one parallel pass. Fast.
+- **Decode** — generates output one token at a time, streaming all model weights
+  per token. Slow (memory-bandwidth-bound).
+
+Because cost on a fixed-price GPU tracks *time on the GPU*, the slow phase
+dominates. Here's the breakdown.
+
+## Worked example (illustrative)
+
+> **Note:** These are illustrative numbers to show the *structure* of the cost,
+> not measured values. The decode throughput (100 tok/s) matches the baseline
+> config; the prefill throughput (~1000 tok/s) is an assumption — prefill is
+> faster than decode because it processes the prompt in parallel, and I've
+> assumed ~10× here for illustration. The input/output mix is assumed. The
+> *shape* of the conclusion (decode dominates) is robust; the exact dollars
+> depend on these assumptions.
+
+**Setup:** $2/hour GPU · 1,000 requests · 100 input + 200 output tokens each.
+
+### Decode cost
+
+- Total decode tokens: 1,000 × 200 = 200,000
+- Decode throughput: 100 tok/s × 3,600 = 360,000 tok/hour
+- Time: 200,000 ÷ 360,000 = 0.556 hours
+- **Cost: 0.556 × \$2 = \$1.11**
+
+### Prefill cost
+
+- Total prefill tokens: 1,000 × 100 = 100,000
+- Prefill throughput (assumed): 1,000 tok/s × 3,600 = 3,600,000 tok/hour
+- Time: 100,000 ÷ 3,600,000 = 0.028 hours
+- **Cost: 0.028 × \$2 = \$0.06**
+
+### Result
+
+| Phase | Tokens | Throughput | Time | Cost   |
+|---|---|---|---|--------|
+| Prefill | 100,000 | ~1,000 tok/s (parallel, fast) | 0.028 hr | \$0.06 |
+| Decode | 200,000 | 100 tok/s (sequential, slow) | 0.556 hr | \$1.11 |
+
+**Decode is ~95% of the cost.** Two compounding reasons:
+1. More tokens (200 output vs 100 input).
+2. Slower per token (sequential decode vs parallel prefill).
+
+The *slowness* matters more than the token count — which is why decode is the
+target of nearly every serving optimization (continuous batching, paged
+attention, quantization, prefix caching). Speed up decode → more tokens/hour →
+lower cost per token, on the same hardware at the same price.
+
+## Applied to this benchmark (measured)
+
+The vLLM-vs-HF comparison in this repo measured **~27× decode throughput** under
+concurrency on the same GPU. By the relationship above, that corresponds to
+roughly a **96% reduction in cost per token** (1/27 ≈ 0.037) — same GPU, same
+hourly rate. On fixed-cost hardware, throughput optimization *is* cost
+optimization.
+
+## Caveats
+
+- Prefill throughput and the input/output token mix in the worked example are
+  illustrative, not measured. The qualitative conclusion (decode dominates,
+  optimizations target decode) holds regardless; the exact figures don't.
+- The decode-vs-prefill ratio depends on the workload: generation-heavy
+  workloads (long outputs) are decode-dominated; prompt-heavy workloads (e.g.
+  RAG with huge context, short output) shift more weight to prefill.
